@@ -73,6 +73,7 @@ class frmSettings : public QDialog
     Q_PROPERTY(bool toolChangeUseCommands READ toolChangeUseCommands WRITE setToolChangeUseCommands)
     Q_PROPERTY(bool toolChangeUseCommandsConfirm READ toolChangeUseCommandsConfirm WRITE setToolChangeUseCommandsConfirm)
     Q_PROPERTY(QString language READ language WRITE setLanguage)
+    Q_PROPERTY(QString theme READ theme WRITE setTheme)
     Q_PROPERTY(bool units READ units WRITE setUnits)
     Q_PROPERTY(int rapidSpeed READ rapidSpeed WRITE setRapidSpeed)
     Q_PROPERTY(int acceleration READ acceleration WRITE setAcceleration)
@@ -185,6 +186,8 @@ public:
     void setToolChangeUseCommandsConfirm(bool value);
     QString language();
     void setLanguage(QString language);
+    QString theme() const;
+    void setTheme(const QString &theme);
     QVector3D machineBounds();
     void setMachineBounds(QVector3D bounds);
     bool homingEnabled();

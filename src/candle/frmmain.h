@@ -31,6 +31,7 @@
 #include "drawers/shaderdrawable.h"
 #include "drawers/selectiondrawer.h"
 #include "drawers/machineboundsdrawer.h"
+#include "drawers/machinetabledrawer.h"
 
 #include "tables/gcodetablemodel.h"
 #include "tables/heightmaptablemodel.h"
@@ -64,6 +65,8 @@ namespace Ui {
 class frmMain;
 class frmProgram;
 }
+
+class MotionWidget;
 
 struct CommandAttributes {
     int length;
@@ -150,6 +153,10 @@ private slots:
     void on_actServiceSettings_triggered();
     void on_actHelpAbout_triggered();
     void on_actHelpDocumentation_triggered();
+    void on_actViewZoomIn_triggered();
+    void on_actViewZoomOut_triggered();
+    void on_actViewZoomReset_triggered();
+    void on_cmdFileClear_clicked();
     void on_actJogStepNext_triggered();
     void on_actJogStepPrevious_triggered();
     void on_actJogFeedNext_triggered();
@@ -289,6 +296,13 @@ protected:
     QMenu *createPopupMenu() override;
 
 private:
+    // hjLabs.in: build a compact custom dock title bar carrying per-panel zoom
+    // (− / % / +) controls wired to the CAM widget's zoom slots, plus float /
+    // close buttons. Templated on the concrete widget type so each call site can
+    // connect to that type's zoomIn/zoomOut/zoomReset/zoomChanged members.
+    template<class W>
+    void installCamTitleBar(class QDockWidget *dock, W *widget, const QString &title);
+
     static const int BUFFERLENGTH = 127;
     static const int PROGRESSMINLINES = 10000;
     static const int PROGRESSSTEP = 1000;    
@@ -356,8 +370,8 @@ private:
     bool m_sdRun;
 
     // Visualizer drawers
-    // TODO: Add machine table visualizer
     OriginDrawer *m_originDrawer;
+    MachineTableDrawer *m_machineTableDrawer;
     GcodeDrawer *m_codeDrawer;    
     GcodeDrawer *m_probeDrawer;
     GcodeDrawer *m_currentDrawer;
@@ -391,6 +405,9 @@ private:
     frmSettings *m_settings;
     frmAbout *m_about;
     frmHelp *m_help;
+
+    // hjLabs.in: GRBL motion/limits settings panel (for routing $$ responses).
+    MotionWidget *m_motionWidget = nullptr;
 
     // Filenames
     QString m_settingsFileName;
@@ -475,6 +492,11 @@ private:
     void loadSettings();
     void saveSettings();
     void applySettings();
+
+    // hjLabs.in UI/UX
+    void applyTheme();
+    void setUiFontSize(int pt);
+    void zoomUiBy(int delta);
     void storeSettings();
     void restoreSettings();
 

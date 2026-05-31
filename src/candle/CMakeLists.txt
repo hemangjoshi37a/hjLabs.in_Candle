@@ -49,14 +49,25 @@ elseif(UNIX)
     set_target_properties(candle PROPERTIES INSTALL_RPATH "$ORIGIN/lib")
 endif()
 
-target_include_directories(candle PRIVATE . ../customwidgets)
+target_include_directories(candle PRIVATE . ../customwidgets ..)
 
 target_compile_definitions(candle PRIVATE
         _USE_MATH_DEFINES
         QT_NO_DEBUG
 )
 
-target_link_libraries(candle PRIVATE customwidgets Qt5::Core Qt5::Widgets Qt5::OpenGL Qt5::SerialPort Qt5::Script Qt5::ScriptTools Qt5::Network Qt5::WebSockets Qt5::Help)
+target_link_libraries(candle PRIVATE customwidgets cadcam Qt5::Core Qt5::Widgets Qt5::OpenGL Qt5::SerialPort Qt5::Script Qt5::ScriptTools Qt5::Network Qt5::WebSockets Qt5::Help)
+
+# Runtime JS plugins (coordinate system, emergency button, user commands, camera)
+# are loaded from "<app dir>/candleplugins" at startup. The installed package
+# ships them next to the binary; mirror that in the build tree so they load when
+# running directly from the build directory.
+add_custom_command(TARGET candle POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_SOURCE_DIR}/src/candleplugins
+        $<TARGET_FILE_DIR:candle>/candleplugins
+    COMMENT "Copying candleplugins next to candle binary"
+)
 
 # Main executable
 if(APPLE)

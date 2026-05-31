@@ -224,6 +224,13 @@ QLabel[overrided=&quot;false&quot;] {
           </widget>
          </item>
          <item>
+          <widget class="QPushButton" name="cmdFileClear">
+           <property name="text">
+            <string>Clear</string>
+           </property>
+          </widget>
+         </item>
+         <item>
           <widget class="QPushButton" name="cmdFileSend">
            <property name="text">
             <string>Send</string>
@@ -336,6 +343,10 @@ QLabel[overrided=&quot;false&quot;] {
     </widget>
     <addaction name="mnuViewWindows"/>
     <addaction name="mnuViewPanels"/>
+    <addaction name="separator"/>
+    <addaction name="actViewZoomIn"/>
+    <addaction name="actViewZoomOut"/>
+    <addaction name="actViewZoomReset"/>
     <addaction name="separator"/>
     <addaction name="actViewLockWindows"/>
     <addaction name="actViewLockPanels"/>
@@ -3178,6 +3189,30 @@ QLabel[overrided=&quot;false&quot;] {
   <action name="actFileNew">
    <property name="text">
     <string>&amp;New</string>
+   </property>
+  </action>
+  <action name="actViewZoomIn">
+   <property name="text">
+    <string>Zoom &amp;In</string>
+   </property>
+   <property name="shortcut">
+    <string>Ctrl+=</string>
+   </property>
+  </action>
+  <action name="actViewZoomOut">
+   <property name="text">
+    <string>Zoom &amp;Out</string>
+   </property>
+   <property name="shortcut">
+    <string>Ctrl+-</string>
+   </property>
+  </action>
+  <action name="actViewZoomReset">
+   <property name="text">
+    <string>&amp;Reset Zoom</string>
+   </property>
+   <property name="shortcut">
+    <string>Ctrl+0</string>
    </property>
   </action>
   <action name="actFileOpen">

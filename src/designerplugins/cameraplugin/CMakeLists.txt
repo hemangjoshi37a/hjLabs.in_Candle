@@ -4,6 +4,11 @@ file(GLOB SRC_FILES *.cpp)
 
 add_library(cameraplugin SHARED ${SRC_FILES})
 
+# Build next to the candle binary so QUiLoader finds CameraWidget/ColorPicker.
+set_target_properties(cameraplugin PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY "${DESIGNER_BUILD_OUTPUT_DIR}"
+    RUNTIME_OUTPUT_DIRECTORY "${DESIGNER_BUILD_OUTPUT_DIR}")
+
 target_link_libraries(cameraplugin PRIVATE Qt5::Core Qt5::Widgets Qt5::UiPlugin Qt5::Multimedia Qt5::MultimediaWidgets)
 
 install(TARGETS cameraplugin

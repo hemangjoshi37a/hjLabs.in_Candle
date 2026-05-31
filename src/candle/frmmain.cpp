@@ -11,6 +11,10 @@
 #include <QMessageBox>
 #include <QComboBox>
 #include <QScrollBar>
+#include <QAbstractSpinBox>
+#include <QAbstractSlider>
+#include <QAbstractScrollArea>
+#include <QWheelEvent>
 #include <QShortcut>
 #include <QAction>
 #include <QLayout>
@@ -23,7 +27,24 @@
 #include <QElapsedTimer>
 #include <QtConcurrent/QtConcurrent>
 #include <QClipboard>
+#include <QDockWidget>
+#include <QScrollArea>
+#include <QFile>
+#include <QPalette>
+#include <QApplication>
+#include <QKeyEvent>
+#include <QLineEdit>
+#include <QPlainTextEdit>
+#include <QTextEdit>
+#include <QToolButton>
+#include <QHBoxLayout>
+#include <QLabel>
 #include "frmmain.h"
+#include "cam/cadcamwidget.h"
+#include "cam/solderingwidget.h"
+#include "cam/writingwidget.h"
+#include "cam/pcbwidget.h"
+#include "cam/motionwidget.h"
 #include "ui_frmmain.h"
 #include "ui_frmsettings.h"
 #include "frmchecklist.h"
@@ -35,6 +56,70 @@
 #include "connections/serialportconnection.h"
 #include "connections/telnetconnection.h"
 #include "connections/websocketconnection.h"
+
+// hjLabs.in: bump this whenever the bundled default dock layout changes, so the
+// new default is re-applied once for existing users (then their layout persists).
+static const int UI_LAYOUT_VERSION = 12;
+
+template<class W>
+void frmMain::installCamTitleBar(QDockWidget *dock, W *widget, const QString &title)
+{
+    // Compact custom title bar: [title] [stretch] [−] [%] [+] [float] [close].
+    QWidget *bar = new QWidget(dock);
+    QHBoxLayout *lay = new QHBoxLayout(bar);
+    lay->setContentsMargins(6, 2, 4, 2);
+    lay->setSpacing(2);
+
+    QLabel *titleLabel = new QLabel(title, bar);
+    QFont tf = titleLabel->font();
+    tf.setBold(true);
+    titleLabel->setFont(tf);
+    lay->addWidget(titleLabel);
+    lay->addStretch(1);
+
+    QToolButton *btnOut = new QToolButton(bar);
+    btnOut->setText(QStringLiteral("−"));
+    btnOut->setAutoRaise(true);
+    btnOut->setToolTip(tr("Zoom out this panel"));
+
+    QToolButton *btnPct = new QToolButton(bar);
+    btnPct->setAutoRaise(true);
+    btnPct->setText(QStringLiteral("%1%").arg(widget->zoomPercent()));
+    btnPct->setToolTip(tr("Click to reset panel zoom to 100%"));
+
+    QToolButton *btnIn = new QToolButton(bar);
+    btnIn->setText(QStringLiteral("+"));
+    btnIn->setAutoRaise(true);
+    btnIn->setToolTip(tr("Zoom in this panel"));
+
+    QToolButton *btnFloat = new QToolButton(bar);
+    btnFloat->setText(QStringLiteral("❒"));
+    btnFloat->setAutoRaise(true);
+    btnFloat->setToolTip(tr("Float / dock this panel"));
+
+    QToolButton *btnClose = new QToolButton(bar);
+    btnClose->setText(QStringLiteral("✕"));
+    btnClose->setAutoRaise(true);
+    btnClose->setToolTip(tr("Close this panel"));
+
+    lay->addWidget(btnOut);
+    lay->addWidget(btnPct);
+    lay->addWidget(btnIn);
+    lay->addWidget(btnFloat);
+    lay->addWidget(btnClose);
+
+    connect(btnOut, &QToolButton::clicked, widget, &W::zoomOut);
+    connect(btnIn, &QToolButton::clicked, widget, &W::zoomIn);
+    connect(btnPct, &QToolButton::clicked, widget, &W::zoomReset);
+    connect(widget, &W::zoomChanged, btnPct, [btnPct](int percent) {
+        btnPct->setText(QStringLiteral("%1%").arg(percent));
+    });
+    connect(btnFloat, &QToolButton::clicked, dock,
+            [dock]() { dock->setFloating(!dock->isFloating()); });
+    connect(btnClose, &QToolButton::clicked, dock, &QDockWidget::close);
+
+    dock->setTitleBarWidget(bar);
+}
 
 frmMain::frmMain(QWidget *parent) : QMainWindow(parent), ui(new Ui::frmMain)
 {
@@ -50,8 +135,172 @@ frmMain::frmMain(QWidget *parent) : QMainWindow(parent), ui(new Ui::frmMain)
     initScriptWrapper();
     initScriptEngine();
 
+    // hjLabs.in CAD/CAM workbench — added beside the controller UI as a dock.
+    // Generated G-code is pushed straight into the existing visualizer/table.
+    {
+        QDockWidget *cadcamDock = new QDockWidget(tr("CAD/CAM"), this);
+        cadcamDock->setObjectName("dockCadCam");
+        CadCamWidget *cadcam = new CadCamWidget(cadcamDock);
+        cadcamDock->setWidget(cadcam);
+        installCamTitleBar(cadcamDock, cadcam, tr("CAD/CAM"));
+        addDockWidget(Qt::RightDockWidgetArea, cadcamDock);
+        connect(cadcam, &CadCamWidget::programGenerated, this,
+                [this](const QStringList &lines) { loadFile(lines); });
+        connect(cadcam, &CadCamWidget::statusMessage, this,
+                [this](const QString &msg) { ui->txtConsole->appendPlainText("; " + msg); });
+
+        QDockWidget *solderDock = new QDockWidget(tr("Soldering"), this);
+        solderDock->setObjectName("dockSoldering");
+        SolderingWidget *solder = new SolderingWidget(solderDock);
+        solderDock->setWidget(solder);
+        installCamTitleBar(solderDock, solder, tr("Soldering"));
+        addDockWidget(Qt::RightDockWidgetArea, solderDock);
+        connect(solder, &SolderingWidget::programGenerated, this,
+                [this](const QStringList &lines) { loadFile(lines); });
+        connect(solder, &SolderingWidget::statusMessage, this,
+                [this](const QString &msg) { ui->txtConsole->appendPlainText("; " + msg); });
+        // Feed the live work-position to the soldering panel so "Record" works.
+        auto pushPos = [this, solder]() {
+            solder->setLivePosition(ui->txtWPosX->value(), ui->txtWPosY->value(),
+                                    ui->txtWPosZ->value());
+        };
+        connect(ui->txtWPosX, qOverload<double>(&QDoubleSpinBox::valueChanged), solder, pushPos);
+        connect(ui->txtWPosY, qOverload<double>(&QDoubleSpinBox::valueChanged), solder, pushPos);
+        connect(ui->txtWPosZ, qOverload<double>(&QDoubleSpinBox::valueChanged), solder, pushPos);
+
+        // Writing mode (text -> pen-plotter G-code via a single-stroke font).
+        QDockWidget *writingDock = new QDockWidget(tr("Writing"), this);
+        writingDock->setObjectName("dockWriting");
+        WritingWidget *writing = new WritingWidget(writingDock);
+        writingDock->setWidget(writing);
+        installCamTitleBar(writingDock, writing, tr("Writing"));
+        addDockWidget(Qt::RightDockWidgetArea, writingDock);
+        connect(writing, &WritingWidget::programGenerated, this,
+                [this](const QStringList &lines) { loadFile(lines); });
+        connect(writing, &WritingWidget::statusMessage, this,
+                [this](const QString &msg) { ui->txtConsole->appendPlainText("; " + msg); });
+
+        // PCB mode (Gerber + Excellon -> isolation / drill / cutout).
+        QDockWidget *pcbDock = new QDockWidget(tr("PCB"), this);
+        pcbDock->setObjectName("dockPcb");
+        PcbWidget *pcb = new PcbWidget(pcbDock);
+        pcbDock->setWidget(pcb);
+        installCamTitleBar(pcbDock, pcb, tr("PCB"));
+        addDockWidget(Qt::RightDockWidgetArea, pcbDock);
+        connect(pcb, &PcbWidget::programGenerated, this,
+                [this](const QStringList &lines) { loadFile(lines); });
+        connect(pcb, &PcbWidget::statusMessage, this,
+                [this](const QString &msg) { ui->txtConsole->appendPlainText("; " + msg); });
+
+        // Motion / limits (read/write GRBL $-settings via the sender).
+        QDockWidget *motionDock = new QDockWidget(tr("Motion / Limits"), this);
+        motionDock->setObjectName("dockMotion");
+        m_motionWidget = new MotionWidget(motionDock);
+        motionDock->setWidget(m_motionWidget);
+        installCamTitleBar(motionDock, m_motionWidget, tr("Motion / Limits"));
+        addDockWidget(Qt::RightDockWidgetArea, motionDock);
+        connect(m_motionWidget, &MotionWidget::commandRequested, this,
+                [this](const QString &cmd) { sendCommand(cmd); });
+        connect(m_motionWidget, &MotionWidget::statusMessage, this,
+                [this](const QString &msg) { ui->txtConsole->appendPlainText("; " + msg); });
+    }
+
+    // hjLabs.in UI/UX: guarantee min/max/restore/close buttons on the window.
+    setWindowFlags(Qt::Window | Qt::WindowTitleHint | Qt::WindowSystemMenuHint
+                   | Qt::WindowMinimizeButtonHint | Qt::WindowMaximizeButtonHint
+                   | Qt::WindowCloseButtonHint);
+
+    // Make every panel scrollable so no dock forces a large minimum width. A
+    // window whose minimum size exceeds the screen cannot be maximized (the WM
+    // hides the maximize button) and cannot be shrunk — this keeps both working
+    // even on small screens. The GL visualizer and panels that already contain
+    // a scroll area are left untouched.
+    foreach (QDockWidget *d, findChildren<QDockWidget*>()) {
+        if (d == ui->dockVisualizer) continue;
+        QWidget *content = d->widget();
+        if (!content || content->findChild<QScrollArea*>()) continue;
+        content->setMinimumSize(0, 0);
+        QScrollArea *sa = new QScrollArea(d);
+        sa->setWidgetResizable(true);
+        sa->setFrameShape(QFrame::NoFrame);
+        // hjLabs.in: no wasted padding around dock contents -> full-width panels.
+        sa->setContentsMargins(0, 0, 0, 0);
+        if (sa->viewport()) sa->viewport()->setContentsMargins(0, 0, 0, 0);
+        if (content->layout()) content->layout()->setContentsMargins(0, 0, 0, 0);
+        d->setWidget(sa);
+        sa->setWidget(content);
+    }
+    if (ui->dockVisualizer && ui->dockVisualizer->widget())
+        ui->dockVisualizer->widget()->setMinimumSize(0, 0);
+    if (ui->glwVisualizer) ui->glwVisualizer->setMinimumSize(80, 80);
+
+    // hjLabs.in: make the G-code program panel a MOVABLE dock instead of the
+    // fixed central widget, so it can be rearranged/floated like every other
+    // panel. The main-window centre becomes a zero-size placeholder so the docks
+    // (visualizer dominant) fill the whole window.
+    if (centralWidget()) {
+        QWidget *c = takeCentralWidget();
+        c->setMinimumSize(0, 0);
+        if (c->layout()) c->layout()->setContentsMargins(0, 0, 0, 0);
+        QScrollArea *sa = new QScrollArea();
+        sa->setWidgetResizable(true);
+        sa->setFrameShape(QFrame::NoFrame);
+        sa->setContentsMargins(0, 0, 0, 0);
+        if (sa->viewport()) sa->viewport()->setContentsMargins(0, 0, 0, 0);
+        sa->setWidget(c);
+
+        QDockWidget *progDock = new QDockWidget(tr("G-code Program"), this);
+        progDock->setObjectName("dockProgram");
+        progDock->setFeatures(QDockWidget::AllDockWidgetFeatures);
+        progDock->setAllowedAreas(Qt::AllDockWidgetAreas);
+        progDock->setWidget(sa);
+        addDockWidget(Qt::BottomDockWidgetArea, progDock);
+
+        // Make the 3D visualizer the CENTRAL widget. A zero-size central widget
+        // makes QMainWindow's dock-splitter resizing fail; using the visualizer
+        // (the dominant element) as the central resize anchor lets every panel —
+        // including the now-docked G-code program — resize against it.
+        if (ui->dockVisualizer && ui->dockVisualizer->widget()) {
+            setCentralWidget(ui->dockVisualizer->widget());
+            ui->dockVisualizer->hide();
+        }
+    }
+    setMinimumSize(0, 0);
+
+    // hjLabs.in: eliminate wasted window padding. Keep AnimatedDocks (lets docks
+    // nest/tab on demand) but drop the main-window contents margins so the
+    // visualizer and panels run edge to edge, and keep dock splitters slim.
+    setContentsMargins(0, 0, 0, 0);
+    setDockOptions(QMainWindow::AnimatedDocks | QMainWindow::AllowNestedDocks
+                   | QMainWindow::AllowTabbedDocks);
+
+    // hjLabs.in: let the bottom dock band span the full width so the left/right
+    // columns sit cleanly between top and bottom — this also makes the vertical
+    // splitters between columns and the centre behave consistently.
+    setCorner(Qt::TopLeftCorner, Qt::LeftDockWidgetArea);
+    setCorner(Qt::BottomLeftCorner, Qt::BottomDockWidgetArea);
+    setCorner(Qt::TopRightCorner, Qt::RightDockWidgetArea);
+    setCorner(Qt::BottomRightCorner, Qt::BottomDockWidgetArea);
+
+    // hjLabs.in: make every panel freely resizable HORIZONTALLY. The CAM panels
+    // have wide forms whose natural minimum width otherwise pins the side columns
+    // (can't be narrowed). Force a tiny minimum width on each dock's content and
+    // let it scroll horizontally when narrower than its natural width.
+    foreach (QDockWidget *d, findChildren<QDockWidget*>()) {
+        QWidget *w = d->widget();
+        if (!w) continue;
+        w->setMinimumWidth(0);
+        if (auto *sa = qobject_cast<QScrollArea*>(w))
+            sa->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+        foreach (QScrollArea *inner, w->findChildren<QScrollArea*>())
+            inner->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    }
+
     // Load settings
     loadSettings();
+    // hjLabs.in: applyTheme() is the source of truth for the window stylesheet
+    // (overrides the initial load in main.cpp).
+    applyTheme();
     setSenderState(SenderStopped);
     updateControlsState();
 
@@ -264,6 +513,7 @@ void frmMain::initUi()
 void frmMain::initDrawers()
 {
     m_originDrawer = new OriginDrawer();
+    m_machineTableDrawer = new MachineTableDrawer();
     m_codeDrawer = new GcodeDrawer();
     m_probeDrawer = new GcodeDrawer();
     m_toolDrawer = new ToolDrawer();
@@ -285,6 +535,17 @@ void frmMain::initDrawers()
     m_selectionDrawer->setVisible(false);
     m_machineBoundsDrawer->setVisible(false);
 
+    // Virtual machine bed/grid for spatial context. Size from configured
+    // machine bounds when present, otherwise the drawer's 300x300 default.
+    {
+        QVector3D b = m_settings->machineBounds();
+        double w = qAbs(b.x());
+        double h = qAbs(b.y());
+        if (w > 0 && h > 0) m_machineTableDrawer->setTableSize(QSizeF(w, h));
+    }
+
+    // Add the table first so it renders behind toolpaths/tool and stays visible.
+    ui->glwVisualizer->addDrawable(m_machineTableDrawer);
     ui->glwVisualizer->addDrawable(m_originDrawer);
     ui->glwVisualizer->addDrawable(m_codeDrawer);
     ui->glwVisualizer->addDrawable(m_probeDrawer);
@@ -642,6 +903,7 @@ void frmMain::on_actServiceSettings_triggered()
 
     if (m_settings->exec()) {
         applySettings();
+        applyTheme();
         emit settingsAccepted();
     } else {
         m_settings->undo();
@@ -657,6 +919,116 @@ void frmMain::on_actHelpAbout_triggered()
 void frmMain::on_actHelpDocumentation_triggered()
 {
     m_help->show();
+}
+
+// hjLabs.in: apply the chosen theme to THIS window. "system" auto-detects from the
+// application palette. After loading the qss we re-apply the dynamic app font-size
+// (the qApp stylesheet carries "QWidget {font-size: Npt}") so zoom/font settings
+// are preserved across theme switches.
+void frmMain::applyTheme()
+{
+    QString theme = m_settings ? m_settings->theme() : QString("system");
+
+    bool dark;
+    if (theme == "dark") {
+        dark = true;
+    } else if (theme == "light") {
+        dark = false;
+    } else { // "system"
+        dark = qApp->palette().color(QPalette::Window).lightness() < 128;
+    }
+    if (qEnvironmentVariableIsSet("HJLABS_FORCE_DARK")) dark = true;   // dev/test hook
+
+    QFile styles(dark ? ":/styles/frmmaindark.qss" : ":/styles/frmmaindefault.qss");
+    if (styles.open(QFile::ReadOnly)) {
+        setStyleSheet(styles.readAll());
+        styles.close();
+    }
+
+    // Set the application PALETTE too. QSS `background` does NOT inherit, so
+    // container widgets nested inside scroll areas keep the default (light)
+    // palette and show light backgrounds in dark mode. A dark palette fixes the
+    // backgrounds the stylesheet doesn't reach. Light mode restores the default.
+    if (dark) {
+        QPalette p;
+        p.setColor(QPalette::Window, QColor(0x1B, 0x1E, 0x24));
+        p.setColor(QPalette::WindowText, QColor(0xE6, 0xE9, 0xEE));
+        p.setColor(QPalette::Base, QColor(0x2E, 0x34, 0x3E));
+        p.setColor(QPalette::AlternateBase, QColor(0x23, 0x28, 0x30));
+        p.setColor(QPalette::Text, QColor(0xE6, 0xE9, 0xEE));
+        p.setColor(QPalette::Button, QColor(0x2E, 0x34, 0x3E));
+        p.setColor(QPalette::ButtonText, QColor(0xE6, 0xE9, 0xEE));
+        p.setColor(QPalette::BrightText, QColor(0xFF, 0xFF, 0xFF));
+        p.setColor(QPalette::ToolTipBase, QColor(0x0F, 0x12, 0x17));
+        p.setColor(QPalette::ToolTipText, QColor(0xE6, 0xE9, 0xEE));
+        p.setColor(QPalette::PlaceholderText, QColor(0x6B, 0x74, 0x80));
+        p.setColor(QPalette::Highlight, QColor(0x4C, 0x8D, 0xFF));
+        p.setColor(QPalette::HighlightedText, QColor(0xFF, 0xFF, 0xFF));
+        p.setColor(QPalette::Disabled, QPalette::WindowText, QColor(0x6B, 0x74, 0x80));
+        p.setColor(QPalette::Disabled, QPalette::Text, QColor(0x6B, 0x74, 0x80));
+        p.setColor(QPalette::Disabled, QPalette::ButtonText, QColor(0x6B, 0x74, 0x80));
+        qApp->setPalette(p);
+    } else {
+        qApp->setPalette(style()->standardPalette());
+    }
+
+    // Re-apply the current application font-size so the theme switch doesn't reset it.
+    qApp->setStyleSheet(QString(qApp->styleSheet()).replace(QRegExp(
+        "QWidget \\{font-size: \\d+pt\\}"),
+        QString("QWidget {font-size: %1pt}").arg(m_settings ? m_settings->fontSize() : 10)));
+
+    // hjLabs.in: make the 3D viewport background follow the theme so the dark
+    // theme looks cohesive instead of leaving a white OpenGL viewport. In dark
+    // mode use a neutral dark that complements the dark stylesheet (#1B1E24);
+    // in light mode keep the user's configured/light background from settings.
+    if (ui && ui->glwVisualizer) {
+        QColor bg = dark
+            ? QColor(0x20, 0x24, 0x2B)
+            : (m_settings ? m_settings->colors("VisualizerBackground") : QColor(Qt::white));
+        ui->glwVisualizer->setColorBackground(bg);
+        ui->glwVisualizer->update();
+    }
+}
+
+// hjLabs.in: set the whole-app font size by editing the qApp stylesheet's
+// "font-size: Npt" token, clamped to a sane range. Re-applying the app stylesheet
+// makes every widget update live.
+void frmMain::setUiFontSize(int pt)
+{
+    pt = qBound(7, pt, 18);
+    qApp->setStyleSheet(QString(qApp->styleSheet()).replace(QRegExp(
+        "QWidget \\{font-size: \\d+pt\\}"),
+        QString("QWidget {font-size: %1pt}").arg(pt)));
+}
+
+void frmMain::zoomUiBy(int delta)
+{
+    // Read the current size out of the qApp stylesheet so zoom is relative.
+    int current = 10;
+    QRegExp rx("QWidget \\{font-size: (\\d+)pt\\}");
+    if (rx.indexIn(qApp->styleSheet()) != -1) current = rx.cap(1).toInt();
+    setUiFontSize(current + delta);
+}
+
+void frmMain::on_actViewZoomIn_triggered()
+{
+    zoomUiBy(1);
+}
+
+void frmMain::on_actViewZoomOut_triggered()
+{
+    zoomUiBy(-1);
+}
+
+void frmMain::on_actViewZoomReset_triggered()
+{
+    setUiFontSize(10);
+}
+
+// hjLabs.in: clear the currently-loaded program (same path as File > New).
+void frmMain::on_cmdFileClear_clicked()
+{
+    on_actFileNew_triggered();
 }
 
 void frmMain::on_actJogStepNext_triggered()
@@ -1893,6 +2265,9 @@ void frmMain::on_sliProgram_valueChanged(int value)
 
 void frmMain::onConnectionDataReceived(QString data)
 {
+    // Feed GRBL setting echoes ("$120=10.000") to the Motion/Limits panel.
+    if (m_motionWidget) m_motionWidget->onResponseLine(data);
+
     // Filter prereset responses
     if (m_reseting) {
         if (!dataIsReset(data)) return;
@@ -3365,6 +3740,9 @@ void frmMain::loadSettings()
     // Language
     m_settings->setLanguage(set.value("language", "en").toString());
 
+    // hjLabs.in: theme (system/light/dark)
+    m_settings->setTheme(set.value("theme", "system").toString());
+
     // Create help
     m_help = new frmHelp(m_settings->language());
     m_help->setWindowFlags(Qt::Window | Qt::WindowSystemMenuHint | Qt::WindowMinimizeButtonHint
@@ -3450,6 +3828,9 @@ void frmMain::saveSettings()
 
     // Language
     set.setValue("language", m_settings->language());
+
+    // hjLabs.in: theme (system/light/dark)
+    set.setValue("theme", m_settings->theme());
 
     set.endGroup();
 }
@@ -3608,6 +3989,7 @@ void frmMain::storeSettings()
     set->setValue("hiddenPanels", hiddenPanels);
     set->setValue("collapsedPanels", collapsedPanels);
     set->setValue("formState", saveState());
+    set->setValue("uiLayoutVersion", UI_LAYOUT_VERSION);
 
     // Save script variables
     QScriptEngine e;
@@ -3820,17 +4202,63 @@ void frmMain::restoreSettings()
 
     // Main window state
     auto formState = set->value("formState").toByteArray();
+    int savedLayoutVersion = set->value("uiLayoutVersion", 0).toInt();
 
-    if (!formState.size()) {
+    // Apply the bundled default layout (independent, non-tabbed CAM docks) on
+    // first run, or once after the default layout is revised (version bumped).
+    if (!formState.size() || savedLayoutVersion < UI_LAYOUT_VERSION) {
         ui->dockScript->setVisible(false);
         ui->dockLog->setVisible(false);
 
         auto cameraDock = findChild<QDockWidget*>("dockCameraPlugin");
         if (cameraDock) cameraDock->setVisible(false);
 
-        resizeDocks({ui->dockModification, ui->dockUser}, {1, 1}, Qt::Vertical);
-        splitDockWidget(ui->dockVisualizer, ui->dockConsole, Qt::Horizontal);
-        splitDockWidget(ui->dockUser, ui->dockDevice, Qt::Horizontal);
+        // The 3D visualizer is the CENTRAL widget; arrange every panel as an
+        // independent (non-tabbed) dock AROUND it. Docking against the real
+        // central widget is what makes splitter-resizing work.
+        auto camDock = [this](const char *name) -> QDockWidget* {
+            auto d = findChild<QDockWidget*>(name);
+            if (!d) return nullptr;
+            d->setFeatures(QDockWidget::AllDockWidgetFeatures); // movable|floatable|closable
+            d->setAllowedAreas(Qt::AllDockWidgetAreas);
+            d->setFloating(false);
+            d->setVisible(true);
+            return d;
+        };
+        QDockWidget *dCadCam    = camDock("dockCadCam");
+        QDockWidget *dSoldering = camDock("dockSoldering");
+        QDockWidget *dWriting   = camDock("dockWriting");
+        QDockWidget *dPcb       = camDock("dockPcb");
+        QDockWidget *dMotion    = camDock("dockMotion");
+        QDockWidget *dProg      = findChild<QDockWidget*>("dockProgram");
+
+        // LEFT column: Modification, CAD/CAM, Soldering (stacked, independent).
+        addDockWidget(Qt::LeftDockWidgetArea, ui->dockModification);
+        QDockWidget *leftTail = ui->dockModification;
+        if (dCadCam)    { splitDockWidget(leftTail, dCadCam, Qt::Vertical);    leftTail = dCadCam; }
+        if (dSoldering) { splitDockWidget(leftTail, dSoldering, Qt::Vertical); leftTail = dSoldering; }
+
+        // RIGHT column: Device, User, Writing, PCB, Motion (stacked, independent).
+        addDockWidget(Qt::RightDockWidgetArea, ui->dockDevice);
+        QDockWidget *rightTail = ui->dockDevice;
+        if (ui->dockUser) { splitDockWidget(rightTail, ui->dockUser, Qt::Vertical); rightTail = ui->dockUser; }
+        if (dWriting) { splitDockWidget(rightTail, dWriting, Qt::Vertical); rightTail = dWriting; }
+        if (dPcb)     { splitDockWidget(rightTail, dPcb, Qt::Vertical);     rightTail = dPcb; }
+        if (dMotion)  { splitDockWidget(rightTail, dMotion, Qt::Vertical);  rightTail = dMotion; }
+
+        // BOTTOM band: Console + G-code program side by side.
+        addDockWidget(Qt::BottomDockWidgetArea, ui->dockConsole);
+        if (dProg) {
+            dProg->setVisible(true);
+            splitDockWidget(ui->dockConsole, dProg, Qt::Horizontal);
+        }
+
+        // Initial sizes: modest side columns and a slim bottom band; the central
+        // visualizer takes the remaining (dominant) area.
+        resizeDocks({ui->dockModification, ui->dockDevice}, {300, 320}, Qt::Horizontal);
+        if (dProg)
+            resizeDocks({ui->dockConsole, dProg}, {1, 1}, Qt::Horizontal);
+        resizeDocks({ui->dockConsole}, {200}, Qt::Vertical);
     } else {
         restoreState(formState);
     }
@@ -4033,7 +4461,19 @@ void frmMain::applySettings()
     ui->glwVisualizer->setZBuffer(m_settings->zBuffer());
     ui->glwVisualizer->setVsync(m_settings->vsync());
     ui->glwVisualizer->setFps(m_settings->fps());
-    ui->glwVisualizer->setColorBackground(m_settings->colors("VisualizerBackground"));
+    // hjLabs.in: in dark theme, keep a dark viewport rather than the (light)
+    // settings background; applyTheme() is the single source of truth, but we
+    // mirror its choice here so applySettings() doesn't momentarily flash the
+    // light background. Light theme uses the user's configured setting.
+    {
+        QString th = m_settings ? m_settings->theme() : QString("system");
+        bool dk = (th == "dark") ? true
+                : (th == "light") ? false
+                : (qApp->palette().color(QPalette::Window).lightness() < 128);
+        ui->glwVisualizer->setColorBackground(dk
+            ? QColor(0x20, 0x24, 0x2B)
+            : m_settings->colors("VisualizerBackground"));
+    }
     ui->glwVisualizer->setColorText(m_settings->colors("VisualizerText"));
 
     // Axis A
@@ -5215,6 +5655,7 @@ void frmMain::updateControlsState() {
         && (m_heightMapMode ? !m_heightMapFileName.isEmpty(): !m_programFileName.isEmpty()));
     ui->cmdFileOpen->setEnabled(m_senderState == SenderStopped);
     ui->cmdFileReset->setEnabled((m_senderState == SenderStopped) && m_programModel.rowCount() > 1 && !m_sdRun);
+    ui->cmdFileClear->setEnabled((m_senderState == SenderStopped) && m_programModel.rowCount() > 1 && !m_sdRun);
     ui->cmdFileSend->setEnabled(portOpened && (m_senderState == SenderStopped) && m_programModel.rowCount() > 1 && !m_sdRun);
     ui->cmdFileSendFromLine->setEnabled(ui->cmdFileSend->isEnabled() && !ui->cmdHeightMapMode->isChecked() && !m_sdRun);
     ui->cmdFilePause->setEnabled(portOpened && (process || paused) && (m_senderState != SenderPausing) && !m_sdRun);
@@ -5524,26 +5965,65 @@ void frmMain::scrollToTableIndex(QModelIndex index)
 
 bool frmMain::eventFilter(QObject *obj, QEvent *event)
 {
-    if (obj->inherits("QWidgetWindow") && !m_settings->isVisible()) {
+    // Prevent the mouse wheel from changing slider / spin-box / combo-box values
+    // on hover (a frequent source of accidental edits). Sliders change only by
+    // click/drag and numeric fields only by typing; the wheel is redirected to
+    // the enclosing scroll area so panels still scroll under the cursor.
+    if (event->type() == QEvent::Wheel) {
+        QWidget *w = qobject_cast<QWidget*>(obj);
+        if (w && !qobject_cast<QScrollBar*>(w) &&
+            (qobject_cast<QAbstractSpinBox*>(w) ||
+             qobject_cast<QComboBox*>(w) ||
+             qobject_cast<QAbstractSlider*>(w))) {
+            for (QWidget *p = w->parentWidget(); p; p = p->parentWidget()) {
+                if (QAbstractScrollArea *sa = qobject_cast<QAbstractScrollArea*>(p)) {
+                    QCoreApplication::sendEvent(sa->viewport(), event);
+                    break;
+                }
+            }
+            return true; // don't let the widget itself consume the wheel
+        }
+    }
 
-        // Jog on keyboard control
-        QKeySequence ks;
+    // hjLabs.in: Keyboard jogging. Handle the jog keys for ANY key event delivered
+    // while the application is active (focus may sit on a child dock / scroll area /
+    // floating panel, not just the main window's QWidgetWindow). Guard on the event
+    // type FIRST so we never reinterpret a non-key event as a QKeyEvent, and skip
+    // jogging while a text-input widget has focus so typing in spin boxes / line
+    // edits / combo boxes is never hijacked.
+    if ((event->type() == QEvent::ShortcutOverride || event->type() == QEvent::KeyRelease)
+        && !m_settings->isVisible() && ui->chkKeyboardControl->isChecked()) {
+
         QKeyEvent *ev = static_cast<QKeyEvent*>(event);
 
-        if ((event->type() == QEvent::ShortcutOverride || event->type() == QEvent::KeyRelease)) {
-            if (ev->key() == Qt::Key_Shift) {
-                ks = QKeySequence(Qt::ShiftModifier);
-            } else if (ev->key() == Qt::Key_Control) {
-                ks = QKeySequence(Qt::ControlModifier);
-            } else if (ev->key() == Qt::Key_Alt) {
-                ks = QKeySequence(Qt::AltModifier);
-            } else {
-                ks = QKeySequence(ev->key() | ev->modifiers());
+        // Don't jog when the user is typing into a text field.
+        QWidget *fw = QApplication::focusWidget();
+        bool textInputFocused = false;
+        if (fw) {
+            if (qobject_cast<QLineEdit*>(fw) || qobject_cast<QAbstractSpinBox*>(fw)
+                || qobject_cast<QPlainTextEdit*>(fw) || qobject_cast<QTextEdit*>(fw)) {
+                textInputFocused = true;
+            } else if (QComboBox *cb = qobject_cast<QComboBox*>(fw)) {
+                if (cb->isEditable()) textInputFocused = true;
             }
         }
 
+        // Jog only while the app is active (avoid stray events from other windows).
+        bool appActive = QApplication::activeWindow() != nullptr;
+
+        QKeySequence ks;
+        if (ev->key() == Qt::Key_Shift) {
+            ks = QKeySequence(Qt::ShiftModifier);
+        } else if (ev->key() == Qt::Key_Control) {
+            ks = QKeySequence(Qt::ControlModifier);
+        } else if (ev->key() == Qt::Key_Alt) {
+            ks = QKeySequence(Qt::AltModifier);
+        } else {
+            ks = QKeySequence(ev->key() | ev->modifiers());
+        }
+
         if ((m_senderState != SenderTransferring) && (m_senderState != SenderStopping)
-            && ui->chkKeyboardControl->isChecked() && !ev->isAutoRepeat())
+            && appActive && !textInputFocused && !ev->isAutoRepeat())
         {
             static QList<QAction*> acts;
             if (acts.isEmpty()) acts << ui->actJogXMinus << ui->actJogXPlus
@@ -5575,7 +6055,11 @@ bool frmMain::eventFilter(QObject *obj, QEvent *event)
                 }
             }
         }
-    } else if (obj == ui->tblProgram && ((m_senderState == SenderTransferring) || (m_senderState == SenderStopping)
+    }
+
+    if ((event->type() == QEvent::KeyPress || event->type() == QEvent::ShortcutOverride
+         || event->type() == QEvent::KeyRelease)
+        && obj == ui->tblProgram && ((m_senderState == SenderTransferring) || (m_senderState == SenderStopping)
         || m_sdRun))
     {
         QKeyEvent *keyEvent = static_cast<QKeyEvent*>(event);
@@ -6085,6 +6569,8 @@ void frmMain::processSettingsResponse(QString response)
         m_machineBoundsDrawer->setBorderRect(QRectF(0, 0,
             m_settings->referenceXPlus() ? -set[130] : set[130],
             m_settings->referenceYPlus() ? -set[131] : set[131]));
+        if (set[130] > 0 && set[131] > 0)
+            m_machineTableDrawer->setTableSize(QSizeF(set[130], set[131]));
     }
 
     m_settings->setDeviceSettings(set);

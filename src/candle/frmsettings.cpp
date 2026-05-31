@@ -667,6 +667,22 @@ void frmSettings::setLanguage(QString language)
     if (i != -1) ui->cboLanguage->setCurrentIndex(i);
 }
 
+QString frmSettings::theme() const
+{
+    switch (ui->cboTheme->currentIndex()) {
+    case 1: return "light";
+    case 2: return "dark";
+    default: return "system";
+    }
+}
+
+void frmSettings::setTheme(const QString &theme)
+{
+    if (theme == "light") ui->cboTheme->setCurrentIndex(1);
+    else if (theme == "dark") ui->cboTheme->setCurrentIndex(2);
+    else ui->cboTheme->setCurrentIndex(0);
+}
+
 QVector3D frmSettings::machineBounds()
 {
     return m_machineBounds;
@@ -976,6 +992,7 @@ void frmSettings::setDefaultSettings()
     ui->chkToolChangeUseCommands->setChecked(false);
     ui->chkToolChangeUseCommandsConfirm->setChecked(false);
     setLanguage("en");
+    setTheme("system");
 }
 
 void frmSettings::on_radDrawModeVectors_toggled(bool checked)

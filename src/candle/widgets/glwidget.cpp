@@ -339,7 +339,9 @@ QColor GLWidget::colorBackground() const
 
 void GLWidget::setColorBackground(const QColor &colorBackground)
 {
+    if (m_colorBackground == colorBackground) return;
     m_colorBackground = colorBackground;
+    update();
 }
 
 void GLWidget::setFps(int fps)
